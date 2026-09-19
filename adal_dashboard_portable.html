@@ -1,0 +1,1296 @@
+<!DOCTYPE html>
+<!--
+  ============================================================================
+  ADAL TARGET — Жиналыс кестесі
+  ============================================================================
+  МИГРАЦИЯ ЕСКЕРТУІ (Cursor / кез-келген әзірлеушіге):
+
+  Бұл файл бастапқыда claude.ai Artifact ортасында жасалды және
+  `window.claude.use('db')` мен `window.claude.use('user')` деген Claude-ге
+  ғана тән API-ларды пайдаланады. Vercel/GitHub Pages сияқты сыртқы хостингте
+  бұл екеуі де `undefined` болады — дерек сақталмайды, рөлдер жұмыс жасамайды.
+
+  Vercel-ге көшіру үшін төмендегі 3 блокты Supabase-пен (немесе таңдаған
+  backend-пен) ауыстыру керек. Іздеу оңай болу үшін әр блок
+  "// === MIGRATE: ... ===" деп белгіленген.
+
+  1. АУТЕНТИФИКАЦИЯ (Claude user capability орнына):
+     - userNS.id() / userNS.canEdit() / userNS.isOwner() / userNS.can() →
+       Supabase Auth session (supabase.auth.getUser())
+     - userNS.profiles() / userNS.search() → Supabase-тегі profiles кестесі
+     - Ұсыныс: users кестесінде `role` бағаны, әдепкі мән 'midl',
+       ROM-ды қолмен 'rom' етіп орнатасыз (Supabase Table Editor арқылы)
+
+  2. ДЕРЕКҚОР (Claude db capability орнына):
+     - dbNS.collection(x).get() / dbNS.doc(x).set()/.delete() →
+       Supabase Postgres: supabase.from('table').select()/.upsert()/.delete()
+     - Кестелер: projects, entries, roles, monthlyPlans, people
+       (әрқайсысының құрылымы төмендегі кодтан JSON пішінінде көрінеді)
+
+  3. РҰҚСАТ ЛОГИКАСЫ (loadRoles функциясындағы isOwner/анyRomTagged
+     эвристикасы) — Supabase-те қажет емес, себебі backend-те ROM-ды
+     сіз тікелей users кестесінен қолмен белгілейсіз. Осы функцияны
+     жеңілдетуге болады: session бар ма → users кестесінен role оқы →
+     role==='rom' болса isAdmin=true.
+
+  Толық жоспар: Next.js + Supabase Auth + Supabase Postgres, Vercel-ге
+  GitHub арқылы деплой. UI/CSS/есептеу логикасы (жоспар бөлу, жасыл/қызыл
+  статус, айлық жиынтық) өзгеріссіз қалады — тек деректі алатын/сақтайтын
+  3 блок ауыстырылады.
+  ============================================================================
+-->
+<html lang="kk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ADAL TARGET — Жиналыс кестесі</title>
+<style>
+  :root{
+    --accent:#1E3A5F;
+    --accent-2:#2D5A8C;
+    --green:#15803D;
+    --green-bg:#EFFCF3;
+    --red:#DC2626;
+    --red-bg:#FEF2F2;
+    --amber:#B45309;
+    --amber-bg:#FFF8EB;
+    --ink:#1F2937;
+    --ink-soft:#5B6470;
+    --line:#E4E7EC;
+    --line-soft:#EEF0F3;
+    --bg:#F7F8FA;
+    --card:#FFFFFF;
+    --radius:12px;
+    --shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.06);
+    box-sizing:border-box;
+    padding-top:env(safe-area-inset-top,0px);
+    padding-bottom:env(safe-area-inset-bottom,0px);
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --ink:#EDEFF2; --ink-soft:#9AA3AF; --bg:#0F1319; --card:#161B22;
+      --line:#262C36; --line-soft:#1D232C;
+      --green-bg:#0E2318; --red-bg:#2A1414; --amber-bg:#2A2010;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ink:#EDEFF2; --ink-soft:#9AA3AF; --bg:#0F1319; --card:#161B22;
+    --line:#262C36; --line-soft:#1D232C;
+    --green-bg:#0E2318; --red-bg:#2A1414; --amber-bg:#2A2010;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:'Times New Roman', Georgia, serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1180px;margin:0 auto;padding:28px 20px 80px;}
+  header.top{
+    display:flex; align-items:flex-end; justify-content:space-between; gap:16px;
+    margin-bottom:22px; flex-wrap:wrap;
+  }
+  .brand small{
+    display:block; letter-spacing:.14em; text-transform:uppercase;
+    font-size:11px; color:var(--ink-soft); font-family:Georgia,serif; margin-bottom:4px;
+  }
+  .brand h1{margin:0; font-size:28px; font-weight:700; color:var(--accent); letter-spacing:-.01em;}
+  .datebar{display:flex; align-items:center; gap:10px;}
+  .datebar input[type=date]{
+    font-family:inherit; font-size:15px; padding:9px 12px; border-radius:9px;
+    border:1px solid var(--line); background:var(--card); color:var(--ink);
+  }
+  .datebar button{
+    font-family:inherit; font-size:14px; padding:9px 14px; border-radius:9px;
+    border:1px solid var(--line); background:var(--card); color:var(--ink-soft); cursor:pointer;
+  }
+  .datebar button:hover{border-color:var(--accent-2); color:var(--accent-2);}
+
+  nav.tabs{display:flex; gap:6px; margin-bottom:20px; border-bottom:1px solid var(--line); flex-wrap:wrap;}
+
+  .role-banner{
+    font-family:Georgia,serif; font-size:13.5px; padding:10px 16px; border-radius:9px;
+    margin-bottom:16px; border:1px solid transparent;
+  }
+  .role-banner.readonly{background:var(--amber-bg); color:var(--amber); border-color:var(--amber);}
+  .role-banner.interact{background:var(--line-soft); color:var(--ink-soft); border-color:var(--line);}
+
+  #roleSearchResults{
+    display:flex; flex-direction:column; gap:4px; max-height:260px; overflow-y:auto;
+    border:1px solid var(--line); border-radius:10px; background:var(--card); margin:0 20px 14px;
+  }
+  .role-hit:hover{background:var(--line-soft);}
+  .mini-btn:hover{filter:brightness(0.95);}
+  nav.tabs button{
+    font-family:inherit; font-size:15px; padding:11px 18px; border:none; background:none;
+    color:var(--ink-soft); cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-1px;
+  }
+  nav.tabs button.active{color:var(--accent); border-bottom-color:var(--accent); font-weight:700;}
+
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    box-shadow:var(--shadow); overflow:hidden; margin-bottom:22px;
+  }
+  .card .head{
+    padding:16px 20px; border-bottom:1px solid var(--line-soft);
+    display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;
+  }
+  .card .head h2{margin:0; font-size:17px; color:var(--ink);}
+  .card .head .sub{font-size:13px; color:var(--ink-soft); font-family:Georgia,serif;}
+
+  .addproj{display:flex; gap:8px; padding:14px 20px; border-bottom:1px solid var(--line-soft); flex-wrap:wrap;}
+  .addproj input{
+    font-family:inherit; flex:1; min-width:160px; font-size:14px; padding:8px 11px;
+    border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--ink);
+  }
+  .addproj button{
+    font-family:inherit; font-size:14px; padding:8px 16px; border-radius:8px; border:none;
+    background:var(--accent); color:#fff; cursor:pointer; white-space:nowrap;
+  }
+  .addproj button:hover{background:var(--accent-2);}
+
+  table{width:100%; border-collapse:collapse; font-size:14px;}
+  thead th{
+    text-align:left; font-family:Georgia,serif; font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--ink-soft); padding:10px 14px; background:var(--line-soft); white-space:nowrap;
+  }
+  tbody td{padding:10px 14px; border-top:1px solid var(--line-soft); vertical-align:top;}
+  tbody tr:hover{background:var(--line-soft);}
+  td.proj{font-weight:700; color:var(--accent); white-space:nowrap;}
+  td input, td textarea{
+    font-family:inherit; width:100%; font-size:14px; padding:6px 9px; border-radius:7px;
+    border:1px solid var(--line); background:var(--bg); color:var(--ink);
+  }
+  td input[type=number]{text-align:right;}
+  td textarea{resize:vertical; min-height:38px; line-height:1.4;}
+  .status-pill{
+    display:inline-flex; align-items:center; gap:6px; padding:5px 11px; border-radius:999px;
+    font-size:12.5px; font-weight:700; white-space:nowrap;
+  }
+  .status-pill.green{background:var(--green-bg); color:var(--green);}
+  .status-pill.red{background:var(--red-bg); color:var(--red);}
+  .status-pill .dot{width:7px;height:7px;border-radius:50%;background:currentColor;}
+  .num{font-variant-numeric:tabular-nums;}
+  .del-row{
+    background:none; border:none; color:var(--ink-soft); cursor:pointer; font-size:18px; line-height:1; padding:4px;
+  }
+  .del-row:hover{color:var(--red);}
+  .empty-hint{padding:30px 20px; text-align:center; color:var(--ink-soft); font-size:14px;}
+
+  .totals-row td{background:var(--line-soft); font-weight:700; border-top:2px solid var(--line);}
+
+  .kpi-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:14px; padding:18px 20px;}
+  .kpi{background:var(--bg); border:1px solid var(--line-soft); border-radius:10px; padding:14px 16px;}
+  .kpi .label{font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-soft); font-family:Georgia,serif; margin-bottom:6px;}
+  .kpi .value{font-size:22px; font-weight:700; color:var(--ink);}
+  .kpi .value.green{color:var(--green);}
+  .kpi .value.red{color:var(--red);}
+
+  select.month-select{
+    font-family:inherit; font-size:14px; padding:8px 12px; border-radius:8px;
+    border:1px solid var(--line); background:var(--card); color:var(--ink);
+  }
+
+  .save-note{font-size:12px; color:var(--ink-soft); padding:10px 20px 4px; font-family:Georgia,serif;}
+  .save-note.saving{color:var(--amber);}
+  .save-note.saved{color:var(--green);}
+
+  footer.foot{text-align:center; font-size:12px; color:var(--ink-soft); padding:30px 0 10px; font-family:Georgia,serif;}
+
+  @media(max-width:640px){
+    .wrap{padding:18px 12px 60px;}
+    .brand h1{font-size:22px;}
+    table{font-size:13px;}
+    thead th, tbody td{padding:8px 10px;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Shown instead of everything else to an Editor nobody has granted a role to yet -->
+  <div id="lockedScreen" style="display:none; max-width:420px; margin:80px auto; text-align:center; padding:0 16px;">
+    <div style="font-size:40px; margin-bottom:14px;">🔒</div>
+    <h2 style="margin:0 0 10px; font-size:20px; color:var(--ink);">Әзірше қатынасыңыз жоқ</h2>
+    <p style="color:var(--ink-soft); font-size:14.5px; line-height:1.6; margin:0;">
+      Бұл дэшбордты көру және толтыру үшін РОМ сізге рұқсат беруі керек.
+      РОМ-ға хабарласып, осы дэшбордта атыңызды тізімге қосуын сұраңыз.
+    </p>
+  </div>
+
+  <div id="mainContent">
+  <header class="top">
+    <div class="brand">
+      <small>ADAL TARGET</small>
+      <h1>Жиналыс кестесі</h1>
+    </div>
+    <div class="datebar">
+      <button id="prevDay">←</button>
+      <input type="date" id="dayPicker">
+      <button id="nextDay">→</button>
+      <button id="todayBtn">Бүгін</button>
+    </div>
+  </header>
+
+  <div id="roleBanner" class="role-banner" style="display:none;"></div>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="daily">Күндік</button>
+    <button class="tab-btn" data-tab="monthly">Айлық жиынтық</button>
+    <button class="tab-btn" data-tab="plans">Жоспарлар</button>
+    <button class="tab-btn" data-tab="manage" id="manageTabBtn">Проекттер</button>
+  </nav>
+
+  <!-- ============ DAILY TAB ============ -->
+  <section id="tab-daily">
+    <div class="card">
+      <div class="head">
+        <div>
+          <h2 id="dailyDateTitle">—</h2>
+          <div class="sub">Жоспар — «Жоспарлар» бетінде ай сайын РОМ орнатады, күнге автоматты бөлінеді. Орындалса — жасыл, орындалмаса — қызыл.</div>
+        </div>
+      </div>
+      <div style="overflow-x:auto;">
+        <table id="dailyTable">
+          <thead>
+            <tr>
+              <th style="min-width:130px;">Проект</th>
+              <th style="min-width:110px;">Түсім (тг)</th>
+              <th style="min-width:110px;">Шығын (тг)</th>
+              <th style="min-width:120px;">Таза пайда (тг)</th>
+              <th style="min-width:120px;">Күндік мақсат</th>
+              <th style="min-width:90px;">Статус</th>
+              <th style="min-width:220px;">Мәселе / Ұсыныс</th>
+              <th style="width:30px;"></th>
+            </tr>
+          </thead>
+          <tbody id="dailyBody"></tbody>
+        </table>
+      </div>
+      <div class="empty-hint" id="dailyEmptyHint" style="display:none;">
+        Әзірше проект қосылмаған. «Проекттер» бетінен қосыңыз.
+      </div>
+      <div class="save-note" id="saveNote">&nbsp;</div>
+    </div>
+
+    <div class="card">
+      <div class="head"><h2>Бүгінгі жиынтық</h2></div>
+      <div class="kpi-grid" id="dailyKpis"></div>
+    </div>
+  </section>
+
+  <!-- ============ MONTHLY TAB ============ -->
+  <section id="tab-monthly" style="display:none;">
+    <div class="card">
+      <div class="head">
+        <h2>Айлық жиынтық</h2>
+        <select class="month-select" id="monthPicker"></select>
+      </div>
+      <div style="overflow-x:auto;">
+        <table id="monthlyTable">
+          <thead>
+            <tr>
+              <th style="min-width:130px;">Проект</th>
+              <th style="min-width:120px;">Жалпы түсім</th>
+              <th style="min-width:120px;">Жалпы шығын</th>
+              <th style="min-width:130px;">Жалпы таза пайда</th>
+              <th style="min-width:130px;">Айлық жоспар</th>
+              <th style="min-width:100px;">Орындалу</th>
+            </tr>
+          </thead>
+          <tbody id="monthlyBody"></tbody>
+          <tfoot id="monthlyFoot"></tfoot>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="head"><h2>Барлық проекттер бойынша общий нәтиже</h2></div>
+      <div class="kpi-grid" id="monthlyKpis"></div>
+    </div>
+  </section>
+
+  <!-- ============ PLANS TAB ============ -->
+  <section id="tab-plans" style="display:none;">
+    <div class="card">
+      <div class="head">
+        <div>
+          <h2>Айлық жоспарлар</h2>
+          <div class="sub">Әр проектке, әр айға бөлек орнатылады. Жаңа ай келгенде ескі айлардың сандары сақталып қалады.</div>
+        </div>
+        <select class="month-select" id="plansMonthPicker"></select>
+      </div>
+      <div id="plansNoPermNote" class="empty-hint" style="display:none; padding:14px 20px; text-align:left; border-bottom:1px solid var(--line-soft);">
+        Жоспарды тек РОМ өзгерте алады. Төменде ағымдағы сандарды қарай аласыз.
+      </div>
+      <div style="overflow-x:auto;">
+        <table id="plansTable">
+          <thead>
+            <tr>
+              <th style="min-width:180px;">Проект</th>
+              <th style="min-width:160px;">Айлық жоспар (тг)</th>
+              <th style="min-width:160px;">Күндік мақсат (авто)</th>
+            </tr>
+          </thead>
+          <tbody id="plansBody"></tbody>
+        </table>
+      </div>
+      <div class="empty-hint" id="plansEmptyHint" style="display:none;">Әзірше проект жоқ.</div>
+    </div>
+  </section>
+
+  <!-- ============ MANAGE TAB ============ -->
+  <section id="tab-manage" style="display:none;">
+    <div class="card">
+      <div class="head"><h2>Проекттерді басқару</h2></div>
+      <div class="addproj">
+        <input type="text" id="newProjName" placeholder="Жаңа проект атауы (мысалы: Түркістан тұғыры)">
+        <button id="addProjBtn">+ Қосу</button>
+      </div>
+      <div id="manageNoPermNote" class="empty-hint" style="display:none; padding:14px 20px; text-align:left; border-bottom:1px solid var(--line-soft);">
+        Проект қосу немесе өшіру — тек РОМ құқығы. Егер сізде бар болуы керек деп ойласаңыз — РОМ-ға хабарласыңыз.
+      </div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>Проект атауы</th><th style="width:60px;"></th></tr></thead>
+          <tbody id="manageBody"></tbody>
+        </table>
+      </div>
+      <div class="empty-hint" id="manageEmptyHint" style="display:none;">Әзірше проект жоқ.</div>
+    </div>
+
+    <!-- ============ ROLE ASSIGNMENT — only shown to effective admins (РОМ) ============ -->
+    <div class="card" id="rolesCard" style="display:none;">
+      <div class="head">
+        <div>
+          <h2>Қатынасты тағайындау</h2>
+          <div class="sub">Editor құқығы бар адам да — осы тізімге қосылғанша ешбір дерек көрмейді. Атын тауып, «Мидл ету» немесе «РОМ ету» бассаңыз — сол сәтте қатынас ашылады.</div>
+        </div>
+      </div>
+      <div class="addproj" style="position:relative;">
+        <input type="text" id="roleSearchInp" placeholder="Аты бойынша іздеу…" autocomplete="off">
+      </div>
+      <div id="roleSearchResults" style="display:none; padding:6px;"></div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>Адам</th><th style="min-width:150px;">Рөлі</th><th style="width:40px;"></th></tr></thead>
+          <tbody id="rolesBody"></tbody>
+        </table>
+      </div>
+      <div class="empty-hint" id="rolesEmptyHint" style="display:none;">Әзірше ешкім белгіленбеген — барлығы платформа деңгейі бойынша анықталады.</div>
+
+      <div style="border-top:1px solid var(--line-soft); margin-top:6px;">
+        <div style="padding:16px 20px 8px;">
+          <h2 style="margin:0 0 4px; font-size:16px;">Кіріп көрген, бірақ рөлі жоқ адамдар</h2>
+          <div class="sub">Іздеу ешкімді таппаса — адам сілтемені кемінде бір рет ашуы керек (тіпті «Әзірше қатынасыңыз жоқ» экранында тұрса да жеткілікті). Содан кейін ол осы жерде шығады.</div>
+        </div>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr><th>Адам</th><th style="width:220px;"></th></tr></thead>
+            <tbody id="pendingBody"></tbody>
+          </table>
+        </div>
+        <div class="empty-hint" id="pendingEmptyHint" style="display:none;">Әзірше ешкім кірмеген.</div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="foot">ADAL TARGET · Маркетинг бөлімі · Регламент 1.0</footer>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  const fmtMoney = n => (Math.round(Number(n)||0)).toLocaleString('ru-RU');
+  // Precise formatter for the auto-computed daily target: 25 000 ÷ 30 =
+  // 833.33..., and the status pill must compare against that exact value,
+  // not a rounded one — rounding first would silently shift which days
+  // count as "orindaldy" near the threshold. Only ever used for display;
+  // fmtMoney (whole тг) stays the formatter for actual money the person typed.
+  const fmtTarget = n => {
+    const v = Number(n)||0;
+    if (!v) return '—';
+    return v.toLocaleString('ru-RU', {minimumFractionDigits:2, maximumFractionDigits:2}) + ' тг';
+  };
+  const todayISO = () => {
+    const d = new Date();
+    return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  };
+  // All date math below runs in UTC on purpose: a local Date object built
+  // from "YYYY-MM-DDT00:00:00" and then round-tripped through
+  // toISOString() shifts by the viewer's UTC offset (e.g. UTC+5 in
+  // Kazakhstan), which was skipping a day on every "prev/next". Using
+  // Date.UTC(...) + getUTC*/setUTCDate keeps every step in the same
+  // timezone-free arithmetic, so a day never gets lost or doubled.
+  function isoToParts(iso){
+    const [y,m,d] = iso.split('-').map(Number);
+    return {y,m,d};
+  }
+  function addDays(iso, delta){
+    const {y,m,d} = isoToParts(iso);
+    const dt = new Date(Date.UTC(y, m-1, d));
+    dt.setUTCDate(dt.getUTCDate()+delta);
+    return dt.getUTCFullYear()+'-'+String(dt.getUTCMonth()+1).padStart(2,'0')+'-'+String(dt.getUTCDate()).padStart(2,'0');
+  }
+  function weekdayOf(iso){
+    const {y,m,d} = isoToParts(iso);
+    return new Date(Date.UTC(y, m-1, d)).getUTCDay();
+  }
+  const monthKey = iso => iso ? iso.slice(0,7) : '';
+
+  // Company's fixed planning horizon — always offered, even for a month
+  // with no daily entries yet, so РОМ can set next month's plan ahead of
+  // time. Extend this array as the calendar moves forward.
+  const FIXED_MONTHS = [
+    '2026-09','2026-10','2026-11','2026-12',
+    '2027-01','2027-02','2027-03','2027-04','2027-05','2027-06','2027-07','2027-08','2027-09',
+  ];
+
+  function daysInMonth(mk){
+    const [y,m] = mk.split('-').map(Number);
+    return new Date(Date.UTC(y, m, 0)).getUTCDate(); // day 0 of next month = last day of this one
+  }
+  const monthLabelsKz = ['Қаңтар','Ақпан','Наурыз','Сәуір','Мамыр','Маусым','Шілде','Тамыз','Қыркүйек','Қазан','Қараша','Желтоқсан'];
+  const monthLabel = key => {
+    if(!key) return key;
+    const [y,m] = key.split('-');
+    return monthLabelsKz[parseInt(m,10)-1] + ' ' + y;
+  };
+
+  let state = {
+    projects: [],          // [{id, name}]
+    entries: {},           // key `${date}__${projectId}` -> {revenue,cost,problem}
+    roles: {},             // id -> 'midl' | 'rom' | null
+    monthlyPlans: {},      // key `${monthKey}__${projectId}` -> number (тг)
+  };
+
+  let currentDate = todayISO();
+  let dbNS = null;
+  let userNS = null;
+  let saveTimer = null;
+  // Access, decided once at boot from the platform's real share level
+  // (View / Can comment / Can interact / Can edit — set in the artifact's
+  // Share menu, not chosen inside the page):
+  //   readOnly  -> viewer cannot write shared data at all (typical: Басшы,
+  //                shared as "View only") — every input becomes plain text
+  //   isAdmin   -> viewer holds "Can edit" (typical: РОМ) — only admins may
+  //                add or delete projects; everyone else can still fill in
+  //                their own daily numbers
+  let readOnly = false;
+  let isAdmin = false;          // effective admin — computed below, not just the raw share level
+  let platformCanEdit = false;  // raw platform "Can edit" (Editor/Manager), before role-tag override
+  let myId = null;
+  let myRole = null;            // 'midl' | 'rom' | null (untagged)
+  let allowed = true;           // false = Editor with no role tag yet -> locked screen (view-only visitors are unaffected)
+  let isOwnerFlag = false;      // the artifact's actual owner — stable, unlike "first Editor to open"
+  let peopleProfiles = {};      // id -> {name, avatarUrl} cache for rendering
+
+  // ---------- storage (db capability, with localStorage fallback) ----------
+  // === MIGRATE: initStorage — Supabase Auth session-мен ауыстыру ===
+  async function initStorage(){
+    try{
+      if (window.claude && window.claude.use){
+        dbNS = await window.claude.use('db');
+        userNS = await window.claude.use('user');
+      }
+    }catch(e){ dbNS = null; userNS = null; }
+
+    if (userNS){
+      try{
+        const [canWrite, canEditPage, id, ownerFlag] = await Promise.all([
+          userNS.can('data.write'),
+          userNS.canEdit(),
+          userNS.id(),
+          userNS.isOwner(),
+        ]);
+        // null means "the platform told us nothing" — treat that like a
+        // normal editor rather than locking the page, per the capability's
+        // own guidance (keep the control, let a refused write decide).
+        readOnly = (canWrite === false);
+        platformCanEdit = (canEditPage === true);
+        isOwnerFlag = (ownerFlag === true);
+        myId = id;
+      }catch(e){ readOnly=false; platformCanEdit=false; myId=null; isOwnerFlag=false; }
+    }
+  }
+
+  // ---------- role tags (РОМ tags people as "мидл" / "РОМ" inside the app) ----------
+  // Why this exists: the workspace's share menu only offers Viewer /
+  // Commentator / Editor, and only Editor can write shared data at all — so
+  // every midl who needs to fill in numbers must be an Editor, which the
+  // platform treats as `admin` (same tier as РОМ). Without a tag, every
+  // Editor would also see the project-management controls. The tag below
+  // lets РОМ mark specific people as "мидл" so the app hides those controls
+  // for them regardless of their raw platform level; an explicit "РОМ" tag
+  // (or being untagged while still an Editor) keeps full access.
+  // === MIGRATE: loadRoles — Supabase-те users кестесінен role оқу арқылы жеңілдетіледі ===
+  async function loadRoles(){
+    state.roles = {};
+    if (dbNS){
+      try{
+        const roleDocs = await dbNS.collection('roles').get();
+        if (roleDocs && roleDocs.docs){
+          roleDocs.docs.forEach(d=>{
+            const data = (typeof d.data === 'function') ? (d.data() || {}) : {};
+            state.roles[d.id] = data.role || null;
+          });
+        }
+      }catch(e){ /* keep empty */ }
+    }
+    myRole = myId ? (state.roles[myId] || null) : null;
+
+    // Default-deny for anyone who can actually write (an Editor): being an
+    // Editor no longer means being an admin by default. РОМ must add each
+    // person by name in "Қатынасты тағайындау" before they see anything —
+    // that click is what grants access, not the platform's Share menu alone.
+    //
+    // The ONE automatic exception is the artifact's real owner (isOwner()) —
+    // a fixed, unique identity, unlike "whoever happens to open the link
+    // first" (which used to misfire: if a midl opened the fresh link before
+    // the actual owner ever did, THEY became РОМ by accident). isOwner() is
+    // stable regardless of visit order, so this fires only for the one
+    // account that actually owns the page, every time, persisted once.
+    if (readOnly){
+      // View-only visitors (e.g. Басшы) are a separate, unaffected path —
+      // they always get the clean read-only dashboard, never the lock
+      // screen, regardless of role tags.
+      isAdmin = false;
+      allowed = true;
+    } else if (isOwnerFlag){
+      isAdmin = true; allowed = true;
+      if (myId && state.roles[myId] !== 'rom'){
+        try{ await dbNS.doc('roles/'+myId).set({role:'rom'}); state.roles[myId]='rom'; }catch(e){}
+      }
+    } else if (myRole === 'rom'){
+      isAdmin = true; allowed = true;
+    } else if (myRole === 'midl'){
+      isAdmin = false; allowed = true;
+    } else {
+      isAdmin = false; allowed = false;
+    }
+
+    // Self-registration: every visitor who can write at all (Editor tier —
+    // the same "interact" level the entries themselves need; a pure
+    // Viewer/Commentator cannot write anywhere by platform rule, so this
+    // simply never fires for them and they stay on their read-only path)
+    // writes ONE small "I opened this page" marker under their own id. This
+    // runs regardless of `allowed` — it's what lets РОМ find and grant
+    // someone who isn't resolvable through user.search() (a personal or
+    // external email invited as Editor, most commonly). Once they've
+    // opened the link at least once, they show up in the "Кіріп көрген"
+    // roster on the Проекттер tab, ready to be tagged. Presence alone
+    // grants nothing.
+    if (myId && dbNS){
+      try{ await dbNS.doc('people/'+myId).set({ts: Date.now()}); }catch(e){}
+    }
+  }
+
+  // People who have opened the page at least once (self-registered above)
+  // but hold no role tag yet — the roster РОМ picks from when user.search()
+  // can't resolve someone (an external or personal-email invite, most
+  // commonly). Admin-only: this data is only fetched when isAdmin.
+  async function loadPendingPeople(){
+    if (!isAdmin || !dbNS) return [];
+    let ids = [];
+    try{
+      const docs = await dbNS.collection('people').get();
+      if (docs && docs.docs) ids = docs.docs.map(d=>d.id);
+    }catch(e){ return []; }
+    return ids.filter(id => id !== myId && !state.roles[id]);
+  }
+
+  function renderAccessGate(){
+    const locked = document.getElementById('lockedScreen');
+    const main = document.getElementById('mainContent');
+    if (!locked || !main) return;
+    locked.style.display = allowed ? 'none' : '';
+    main.style.display = allowed ? '' : 'none';
+  }
+
+  // === MIGRATE: setRole — Supabase: update('users').set({role}).eq('id', id) ===
+  async function setRole(id, role){
+    // role: 'midl' | 'rom' | null (null removes the tag — revokes access)
+    if (!isAdmin || !dbNS) return;
+    if (role === null){
+      state.roles[id] = null;
+      try{ await dbNS.doc('roles/'+id).delete(); }catch(e){}
+    } else {
+      state.roles[id] = role;
+      try{ await dbNS.doc('roles/'+id).set({role}); }catch(e){}
+    }
+  }
+
+  function localLoad(){
+    try{
+      const raw = localStorage.getItem('adal_dash_v1');
+      if(raw) return JSON.parse(raw);
+    }catch(e){}
+    return null;
+  }
+  function localSave(){
+    try{ localStorage.setItem('adal_dash_v1', JSON.stringify(state)); }catch(e){}
+  }
+
+  // === MIGRATE: loadAll — Supabase-тен projects/entries/monthlyPlans оқу ===
+  async function loadAll(){
+    if(dbNS){
+      try{
+        const projDocs = await dbNS.collection('projects').get();
+        state.projects = (projDocs && projDocs.docs) ? projDocs.docs.map(d=>{
+          const data = (typeof d.data === 'function') ? (d.data() || {}) : {};
+          return {id:d.id, name:data.name || d.id};
+        }) : [];
+      }catch(e){ state.projects = []; }
+      try{
+        const entryDocs = await dbNS.collection('entries').get();
+        state.entries = {};
+        if(entryDocs && entryDocs.docs){
+          entryDocs.docs.forEach(d=>{
+            const data = (typeof d.data === 'function') ? (d.data() || {}) : {};
+            state.entries[d.id] = data;
+          });
+        }
+      }catch(e){ state.entries = {}; }
+      try{
+        const planDocs = await dbNS.collection('monthlyPlans').get();
+        state.monthlyPlans = {};
+        if(planDocs && planDocs.docs){
+          planDocs.docs.forEach(d=>{
+            const data = (typeof d.data === 'function') ? (d.data() || {}) : {};
+            state.monthlyPlans[d.id] = Number(data.plan)||0;
+          });
+        }
+      }catch(e){ state.monthlyPlans = {}; }
+      // keep a local mirror as backup
+      localSave();
+    } else {
+      const local = localLoad();
+      if(local){ state = local; }
+    }
+  }
+
+  function getMonthlyPlan(mk, projectId){
+    return Number(state.monthlyPlans[mk+'__'+projectId]) || 0;
+  }
+  // === MIGRATE: setMonthlyPlan — Supabase: upsert('monthly_plans') ===
+  async function setMonthlyPlan(mk, projectId, value){
+    if (!isAdmin) return; // жоспарды тек РОМ өзгертеді
+    const key = mk+'__'+projectId;
+    const num = Number(value)||0;
+    state.monthlyPlans[key] = num;
+    localSave();
+    if(dbNS){
+      try{ await dbNS.doc('monthlyPlans/'+key).set({plan:num}); }catch(e){}
+    }
+  }
+
+  function markSaving(){
+    const el = document.getElementById('saveNote');
+    el.textContent = 'Сақталуда…'; el.className='save-note saving';
+  }
+  function markSaved(){
+    const el = document.getElementById('saveNote');
+    el.textContent = 'Сақталды ✓'; el.className='save-note saved';
+    setTimeout(()=>{ if(el.className==='save-note saved'){ el.textContent='\u00A0'; el.className='save-note'; } }, 1800);
+  }
+
+  // === MIGRATE: saveEntry — Supabase: upsert('entries', {date, project_id, revenue, cost, problem}) ===
+  async function saveEntry(key, data){
+    if (readOnly) return; // View-only виewer's inputs are never rendered, but guard anyway
+    state.entries[key] = data;
+    localSave(); // always keep a local mirror, instantly
+    markSaving();
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(async ()=>{
+      if(dbNS){
+        try{
+          await dbNS.doc('entries/'+key).set(data);
+        }catch(e){ /* local mirror already has it */ }
+      }
+      markSaved();
+    }, 500);
+  }
+
+  // === MIGRATE: addProject / deleteProject — Supabase: insert/delete on 'projects' ===
+  async function addProject(name){
+    if (!isAdmin) return null; // тек РОМ (Can edit) проект қоса алады
+    const id = 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
+    state.projects.push({id, name});
+    localSave();
+    if(dbNS){
+      try{ await dbNS.doc('projects/'+id).set({name}); }catch(e){}
+    }
+    return id;
+  }
+
+  async function deleteProject(id){
+    if (!isAdmin) return; // тек РОМ (Can edit) проект өшіре алады
+    state.projects = state.projects.filter(p=>p.id!==id);
+    // also drop that project's entries from local state so old numbers don't linger
+    Object.keys(state.entries).forEach(k=>{
+      if(k.endsWith('__'+id)) delete state.entries[k];
+    });
+    localSave();
+    if(dbNS){
+      try{ await dbNS.doc('projects/'+id).delete(); }catch(e){}
+    }
+  }
+
+  // ---------- tabs ----------
+  document.querySelectorAll('.tab-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      ['daily','monthly','plans','manage'].forEach(t=>{
+        document.getElementById('tab-'+t).style.display = (t===btn.dataset.tab)?'':'none';
+      });
+      if(btn.dataset.tab==='monthly') renderMonthly();
+      if(btn.dataset.tab==='plans') renderPlans();
+      if(btn.dataset.tab==='manage'){ renderManage(); renderRolesPanel(); wireRoleSearch(); }
+    });
+  });
+
+  // ---------- date nav ----------
+  const dayPicker = document.getElementById('dayPicker');
+  dayPicker.value = currentDate;
+  function setDate(iso){
+    currentDate = iso;
+    dayPicker.value = iso;
+    renderDaily();
+  }
+  document.getElementById('prevDay').addEventListener('click', ()=>{
+    setDate(addDays(currentDate, -1));
+  });
+  document.getElementById('nextDay').addEventListener('click', ()=>{
+    setDate(addDays(currentDate, 1));
+  });
+  document.getElementById('todayBtn').addEventListener('click', ()=> setDate(todayISO()));
+  dayPicker.addEventListener('change', ()=> setDate(dayPicker.value));
+
+  // ---------- daily render ----------
+  const kzWeekday = ['Жексенбі','Дүйсенбі','Сейсенбі','Сәрсенбі','Бейсенбі','Жұма','Сенбі'];
+  function niceDate(iso){
+    const {y,m,d} = isoToParts(iso);
+    return kzWeekday[weekdayOf(iso)] + ', ' + d + '.' + String(m).padStart(2,'0') + '.' + y;
+  }
+
+  function renderDaily(){
+    document.getElementById('dailyDateTitle').textContent = niceDate(currentDate);
+    const body = document.getElementById('dailyBody');
+    const hint = document.getElementById('dailyEmptyHint');
+    body.innerHTML = '';
+
+    if(state.projects.length===0){
+      hint.style.display='';
+    } else {
+      hint.style.display='none';
+    }
+
+    const mk = monthKey(currentDate);
+    const dim = daysInMonth(mk);
+
+    let totalRevenue=0, totalCost=0, totalProfit=0, totalPlan=0, greenCount=0;
+
+    state.projects.forEach(proj=>{
+      const key = currentDate+'__'+proj.id;
+      const e = state.entries[key] || {revenue:'', cost:'', problem:''};
+      const revenue = Number(e.revenue)||0;
+      const cost = Number(e.cost)||0;
+      const profit = revenue - cost;
+      // Daily target = this project's monthly plan (set on "Жоспарлар" tab)
+      // spread evenly across the days of the current month — no more typing
+      // a plan by hand every single day.
+      const monthlyPlan = getMonthlyPlan(mk, proj.id);
+      const dailyTarget = monthlyPlan > 0 ? (monthlyPlan / dim) : 0; // exact, not rounded — rounding first would shift the green/red threshold
+      const met = dailyTarget>0 ? profit>=dailyTarget : profit>0;
+
+      totalRevenue+=revenue; totalCost+=cost; totalProfit+=profit; totalPlan+=dailyTarget;
+      if(met) greenCount++;
+
+      const tr = document.createElement('tr');
+
+      if (readOnly){
+        // Басшы / View-only режимі: ешбір өріс өзгертілмейді, тек сандар көрінеді
+        tr.innerHTML = `
+          <td class="proj">${escapeHtml(proj.name)}</td>
+          <td class="num">${e.revenue ? fmtMoney(revenue) : '—'}</td>
+          <td class="num">${e.cost ? fmtMoney(cost) : '—'}</td>
+          <td class="num profit-cell">${fmtMoney(profit)}</td>
+          <td class="num">${fmtTarget(dailyTarget)}</td>
+          <td><span class="status-pill ${met?'green':'red'}"><span class="dot"></span>${met?'Орындалды':'Орындалмады'}</span></td>
+          <td>${escapeHtml(e.problem||'—')}</td>
+          <td></td>
+        `;
+        body.appendChild(tr);
+        return;
+      }
+
+      tr.innerHTML = `
+        <td class="proj">${escapeHtml(proj.name)}</td>
+        <td><input type="number" inputmode="decimal" class="inp-revenue" value="${e.revenue||''}" placeholder="0"></td>
+        <td><input type="number" inputmode="decimal" class="inp-cost" value="${e.cost||''}" placeholder="0"></td>
+        <td class="num profit-cell">${fmtMoney(profit)}</td>
+        <td class="num" style="color:var(--ink-soft);" title="Айлық жоспар ${monthlyPlan?fmtMoney(monthlyPlan)+' тг':'орнатылмаған'} ÷ ${dim} күн">${fmtTarget(dailyTarget)}</td>
+        <td><span class="status-pill ${met?'green':'red'}"><span class="dot"></span>${met?'Орындалды':'Орындалмады'}</span></td>
+        <td><textarea class="inp-problem" placeholder="Мәселе / себебі / шешімі немесе тұрақтандыру ұсынысы">${escapeHtml(e.problem||'')}</textarea></td>
+        <td><button class="del-row" title="Бүгінгі жазбаны тазалау" data-key="${key}">&times;</button></td>
+      `;
+      body.appendChild(tr);
+
+      const revInp = tr.querySelector('.inp-revenue');
+      const costInp = tr.querySelector('.inp-cost');
+      const probInp = tr.querySelector('.inp-problem');
+      const profitCell = tr.querySelector('.profit-cell');
+      const pill = tr.querySelector('.status-pill');
+
+      function recalc(){
+        const r = Number(revInp.value)||0;
+        const c = Number(costInp.value)||0;
+        const pr = r-c;
+        profitCell.textContent = fmtMoney(pr);
+        const ok = dailyTarget>0 ? pr>=dailyTarget : pr>0;
+        pill.className = 'status-pill '+(ok?'green':'red');
+        pill.innerHTML = `<span class="dot"></span>${ok?'Орындалды':'Орындалмады'}`;
+      }
+      function persist(){
+        saveEntry(key, {
+          revenue: revInp.value, cost: costInp.value, problem: probInp.value
+        });
+        recalc();
+        renderDailyKpis();
+      }
+      [revInp,costInp].forEach(inp=> inp.addEventListener('input', persist));
+      probInp.addEventListener('input', persist);
+
+      tr.querySelector('.del-row').addEventListener('click', ()=>{
+        revInp.value=''; costInp.value=''; probInp.value='';
+        persist();
+      });
+    });
+
+    renderDailyKpis();
+  }
+
+  function renderDailyKpis(){
+    const mk = monthKey(currentDate);
+    const dim = daysInMonth(mk);
+    let totalRevenue=0, totalCost=0, totalProfit=0, totalPlan=0, metCount=0, total=0;
+    state.projects.forEach(proj=>{
+      const key = currentDate+'__'+proj.id;
+      const e = state.entries[key] || {};
+      const r = Number(e.revenue)||0, c=Number(e.cost)||0;
+      const pr = r-c;
+      const monthlyPlan = getMonthlyPlan(mk, proj.id);
+      const dailyTarget = monthlyPlan > 0 ? (monthlyPlan / dim) : 0;
+      totalRevenue+=r; totalCost+=c; totalProfit+=pr; totalPlan+=dailyTarget;
+      total++;
+      if(dailyTarget>0 ? pr>=dailyTarget : pr>0) metCount++;
+    });
+    const kpis = document.getElementById('dailyKpis');
+    kpis.innerHTML = `
+      <div class="kpi"><div class="label">Жалпы түсім</div><div class="value num">${fmtMoney(totalRevenue)} тг</div></div>
+      <div class="kpi"><div class="label">Жалпы шығын</div><div class="value num">${fmtMoney(totalCost)} тг</div></div>
+      <div class="kpi"><div class="label">Жалпы таза пайда</div><div class="value num ${totalProfit>=0?'green':'red'}">${fmtMoney(totalProfit)} тг</div></div>
+      <div class="kpi"><div class="label">Жоспар орындалған проект</div><div class="value">${metCount} / ${total}</div></div>
+    `;
+  }
+
+  // ---------- monthly ----------
+  function allMonthKeys(){
+    const keys = new Set(FIXED_MONTHS);
+    Object.keys(state.entries).forEach(k=>{
+      const date = k.split('__')[0];
+      if(date) keys.add(monthKey(date));
+    });
+    keys.add(monthKey(currentDate));
+    return Array.from(keys).sort(); // ascending — the plan calendar reads forward in time
+  }
+
+  function populateSelect(selectEl){
+    const keys = allMonthKeys();
+    const prev = selectEl.value;
+    const nowKey = todayISO().slice(0,7);
+    selectEl.innerHTML = keys.map(k=>`<option value="${k}">${monthLabel(k)}</option>`).join('');
+    if(keys.includes(prev)) selectEl.value = prev;
+    else if(keys.includes(nowKey)) selectEl.value = nowKey;
+    else selectEl.value = keys[0];
+  }
+
+  function renderMonthly(){
+    const sel = document.getElementById('monthPicker');
+    populateSelect(sel);
+    if(!sel._wired){
+      sel.addEventListener('change', drawMonthly);
+      sel._wired = true;
+    }
+    drawMonthly();
+  }
+
+  function drawMonthly(){
+    const mk = document.getElementById('monthPicker').value;
+    const body = document.getElementById('monthlyBody');
+    const foot = document.getElementById('monthlyFoot');
+    body.innerHTML=''; foot.innerHTML='';
+
+    let grandRevenue=0, grandCost=0, grandProfit=0, grandPlan=0;
+
+    state.projects.forEach(proj=>{
+      let revenue=0, cost=0;
+      Object.keys(state.entries).forEach(k=>{
+        const [date, pid] = k.split('__');
+        if(pid===proj.id && monthKey(date)===mk){
+          const e = state.entries[k];
+          revenue += Number(e.revenue)||0;
+          cost += Number(e.cost)||0;
+        }
+      });
+      const plan = getMonthlyPlan(mk, proj.id);
+      const profit = revenue-cost;
+      const pct = plan>0 ? Math.round((profit/plan)*100) : (profit>0?100:0);
+      grandRevenue+=revenue; grandCost+=cost; grandProfit+=profit; grandPlan+=plan;
+
+      const tr = document.createElement('tr');
+      const ok = plan>0 ? profit>=plan : profit>0;
+      tr.innerHTML = `
+        <td class="proj">${escapeHtml(proj.name)}</td>
+        <td class="num">${fmtMoney(revenue)} тг</td>
+        <td class="num">${fmtMoney(cost)} тг</td>
+        <td class="num" style="color:${profit>=0?'var(--green)':'var(--red)'};font-weight:700;">${fmtMoney(profit)} тг</td>
+        <td class="num">${fmtMoney(plan)} тг</td>
+        <td><span class="status-pill ${ok?'green':'red'}"><span class="dot"></span>${pct}%</span></td>
+      `;
+      body.appendChild(tr);
+    });
+
+    const trTotal = document.createElement('tr');
+    trTotal.className='totals-row';
+    trTotal.innerHTML = `
+      <td>Барлығы</td>
+      <td class="num">${fmtMoney(grandRevenue)} тг</td>
+      <td class="num">${fmtMoney(grandCost)} тг</td>
+      <td class="num" style="color:${grandProfit>=0?'var(--green)':'var(--red)'};">${fmtMoney(grandProfit)} тг</td>
+      <td class="num">${fmtMoney(grandPlan)} тг</td>
+      <td>${grandPlan>0?Math.round((grandProfit/grandPlan)*100):0}%</td>
+    `;
+    foot.appendChild(trTotal);
+
+    const kpis = document.getElementById('monthlyKpis');
+    kpis.innerHTML = `
+      <div class="kpi"><div class="label">${monthLabel(mk)} — жалпы түсім</div><div class="value num">${fmtMoney(grandRevenue)} тг</div></div>
+      <div class="kpi"><div class="label">Жалпы шығын</div><div class="value num">${fmtMoney(grandCost)} тг</div></div>
+      <div class="kpi"><div class="label">Жалпы таза пайда</div><div class="value num ${grandProfit>=0?'green':'red'}">${fmtMoney(grandProfit)} тг</div></div>
+      <div class="kpi"><div class="label">Жоспар орындалуы</div><div class="value">${grandPlan>0?Math.round((grandProfit/grandPlan)*100):0}%</div></div>
+    `;
+  }
+
+  // ---------- plans tab ----------
+  function renderPlans(){
+    const sel = document.getElementById('plansMonthPicker');
+    populateSelect(sel);
+    if(!sel._wired){
+      sel.addEventListener('change', drawPlans);
+      sel._wired = true;
+    }
+    drawPlans();
+  }
+
+  function drawPlans(){
+    const mk = document.getElementById('plansMonthPicker').value;
+    const body = document.getElementById('plansBody');
+    const hint = document.getElementById('plansEmptyHint');
+    const note = document.getElementById('plansNoPermNote');
+    body.innerHTML = '';
+    hint.style.display = state.projects.length===0 ? '' : 'none';
+    note.style.display = isAdmin ? 'none' : '';
+
+    const dim = daysInMonth(mk);
+
+    state.projects.forEach(proj=>{
+      const plan = getMonthlyPlan(mk, proj.id);
+      const daily = plan>0 ? (plan/dim) : 0;
+      const tr = document.createElement('tr');
+
+      if (!isAdmin){
+        tr.innerHTML = `
+          <td class="proj">${escapeHtml(proj.name)}</td>
+          <td class="num">${plan ? fmtMoney(plan)+' тг' : '—'}</td>
+          <td class="num" style="color:var(--ink-soft);">${fmtTarget(daily)}</td>
+        `;
+        body.appendChild(tr);
+        return;
+      }
+
+      tr.innerHTML = `
+        <td class="proj">${escapeHtml(proj.name)}</td>
+        <td><input type="number" inputmode="decimal" class="inp-monthplan" value="${plan||''}" placeholder="0"></td>
+        <td class="num daily-target" style="color:var(--ink-soft);">${fmtTarget(daily)}</td>
+      `;
+      body.appendChild(tr);
+
+      const planInp = tr.querySelector('.inp-monthplan');
+      const dailyCell = tr.querySelector('.daily-target');
+      let t = null;
+      planInp.addEventListener('input', ()=>{
+        const v = Number(planInp.value)||0;
+        dailyCell.textContent = fmtTarget(v ? v/dim : 0);
+        clearTimeout(t);
+        t = setTimeout(()=> setMonthlyPlan(mk, proj.id, planInp.value), 500);
+      });
+    });
+  }
+
+  // ---------- manage projects ----------
+  function renderManage(){
+    const body = document.getElementById('manageBody');
+    const hint = document.getElementById('manageEmptyHint');
+    const addBox = document.querySelector('.addproj');
+    const permNote = document.getElementById('manageNoPermNote');
+
+    // Проект қосу/өшіру — тек РОМ (Can edit) құқығы бар адамға
+    if (addBox) addBox.style.display = isAdmin ? '' : 'none';
+    if (permNote) permNote.style.display = isAdmin ? 'none' : '';
+
+    body.innerHTML='';
+    hint.style.display = state.projects.length===0 ? '' : 'none';
+    state.projects.forEach(p=>{
+      const tr = document.createElement('tr');
+      if (!isAdmin){
+        tr.innerHTML = `<td>${escapeHtml(p.name)}</td><td></td>`;
+        body.appendChild(tr);
+        return;
+      }
+      tr.innerHTML = `
+        <td>${escapeHtml(p.name)}</td>
+        <td><button class="del-row confirm-del" data-id="${p.id}" title="Өшіру">&times;</button></td>
+      `;
+      const btn = tr.querySelector('.del-row');
+      let armed = false;
+      let armTimer = null;
+      btn.addEventListener('click', async ()=>{
+        if(!armed){
+          armed = true;
+          btn.textContent = 'Растау';
+          btn.style.fontSize = '12px';
+          btn.style.color = 'var(--red)';
+          btn.style.fontWeight = '700';
+          clearTimeout(armTimer);
+          armTimer = setTimeout(()=>{
+            armed = false;
+            btn.innerHTML = '&times;';
+            btn.style.fontSize = '';
+            btn.style.fontWeight = '';
+          }, 2500);
+          return;
+        }
+        clearTimeout(armTimer);
+        await deleteProject(p.id);
+        renderManage();
+        renderDaily();
+      });
+      body.appendChild(tr);
+    });
+  }
+
+  document.getElementById('addProjBtn').addEventListener('click', async ()=>{
+    if (!isAdmin) return;
+    const inp = document.getElementById('newProjName');
+    const name = inp.value.trim();
+    if(!name) return;
+    await addProject(name);
+    inp.value='';
+    renderManage();
+    renderDaily();
+  });
+  document.getElementById('newProjName').addEventListener('keydown', e=>{
+    if(e.key==='Enter') document.getElementById('addProjBtn').click();
+  });
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // ---------- role assignment panel (РОМ tags people as мидл / РОМ) ----------
+  let roleSearchTimer = null;
+
+  function renderRolesPanel(){
+    const card = document.getElementById('rolesCard');
+    if (!card) return;
+    card.style.display = isAdmin ? '' : 'none';
+    if (!isAdmin) return;
+    renderRolesList();
+    renderPendingList();
+  }
+
+  async function renderPendingList(){
+    const body = document.getElementById('pendingBody');
+    const hint = document.getElementById('pendingEmptyHint');
+    if (!body) return;
+    const ids = await loadPendingPeople();
+    body.innerHTML = '';
+    hint.style.display = ids.length === 0 ? '' : 'none';
+    if (ids.length === 0) return;
+
+    let profiles = {};
+    if (userNS){
+      try{ profiles = await userNS.profiles(ids); }catch(e){ profiles = {}; }
+    }
+
+    ids.forEach(id=>{
+      const p = profiles[id];
+      const label = (p && p.name) ? p.name : ('Белгісіз адам (' + id.slice(0,8) + '…)');
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${escapeHtml(label)}</td>
+        <td style="white-space:nowrap;">
+          <button class="mini-btn pending-midl" data-id="${id}" style="font-family:inherit;font-size:12px;padding:5px 10px;border-radius:6px;border:1px solid var(--line);background:var(--red-bg);color:var(--red);cursor:pointer;margin-right:6px;">Мидл ету</button>
+          <button class="mini-btn pending-rom" data-id="${id}" style="font-family:inherit;font-size:12px;padding:5px 10px;border-radius:6px;border:1px solid var(--line);background:var(--green-bg);color:var(--green);cursor:pointer;">РОМ ету</button>
+        </td>
+      `;
+      tr.querySelector('.pending-midl').addEventListener('click', async ()=>{
+        await setRole(id, 'midl'); renderRolesPanel(); renderManage(); renderDaily();
+      });
+      tr.querySelector('.pending-rom').addEventListener('click', async ()=>{
+        await setRole(id, 'rom'); renderRolesPanel(); renderManage(); renderDaily();
+      });
+      body.appendChild(tr);
+    });
+  }
+
+  async function renderRolesList(){
+    const body = document.getElementById('rolesBody');
+    const hint = document.getElementById('rolesEmptyHint');
+    const ids = Object.keys(state.roles).filter(id => state.roles[id]);
+    body.innerHTML = '';
+    hint.style.display = ids.length === 0 ? '' : 'none';
+    if (ids.length === 0) return;
+
+    let profiles = {};
+    if (userNS){
+      try{ profiles = await userNS.profiles(ids); }catch(e){ profiles = {}; }
+    }
+
+    ids.forEach(id=>{
+      const role = state.roles[id];
+      const p = profiles[id];
+      const label = (p && p.name) ? p.name : ('Белгісіз (' + id.slice(0,8) + '…)');
+      const isMe = (id === myId);
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${escapeHtml(label)}${isMe ? ' <span style="color:var(--ink-soft);font-size:12px;">(сіз)</span>' : ''}</td>
+        <td><span class="status-pill ${role==='rom'?'green':'red'}"><span class="dot"></span>${role==='rom'?'РОМ':'Мидл'}</span></td>
+        <td><button class="del-row" title="Белгіні алып тастау" data-id="${id}">&times;</button></td>
+      `;
+      tr.querySelector('.del-row').addEventListener('click', async ()=>{
+        await setRole(id, null);
+        renderRolesList();
+        renderRoleBanner();
+        renderManage();
+        renderDaily();
+      });
+      body.appendChild(tr);
+    });
+  }
+
+  // === MIGRATE: wireRoleSearch — Supabase: select from 'users' where name ilike '%query%' ===
+  function wireRoleSearch(){
+    const inp = document.getElementById('roleSearchInp');
+    const results = document.getElementById('roleSearchResults');
+    if (!inp || inp._wired) return;
+    inp._wired = true;
+
+    async function runSearch(){
+      const q = inp.value.trim();
+      if (!userNS){ results.style.display='none'; return; }
+      let hits = [];
+      try{ hits = await userNS.search(q); }catch(e){ hits = []; }
+      if (hits.length === 0){
+        if (q.length === 0){ results.style.display='none'; results.innerHTML=''; return; }
+        // Search only finds people already resolvable in the org directory —
+        // an external or personal email invited as Editor won't show up
+        // here until they've opened the link themselves at least once.
+        results.style.display = '';
+        results.innerHTML = `<div style="padding:10px 12px; font-size:13px; color:var(--ink-soft);">
+          Ешкім табылмады. Егер бұл сыртқы email болса — сол адам сілтемені кемінде бір рет өзі ашуы керек,
+          содан кейін төмендегі «Кіріп көрген, бірақ рөлі жоқ адамдар» тізімінде шығады.
+        </div>`;
+        return;
+      }
+      results.style.display = '';
+      results.innerHTML = hits.map(p => `
+        <div class="role-hit" data-id="${p.id}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer;">
+          <img src="${p.avatarUrl}" style="width:26px;height:26px;border-radius:50%;" alt="">
+          <span style="flex:1;">${escapeHtml(p.name || 'Белгісіз')}</span>
+          <button class="mini-btn" data-id="${p.id}" data-role="midl" style="font-family:inherit;font-size:12px;padding:5px 10px;border-radius:6px;border:1px solid var(--line);background:var(--red-bg);color:var(--red);cursor:pointer;">Мидл ету</button>
+          <button class="mini-btn" data-id="${p.id}" data-role="rom" style="font-family:inherit;font-size:12px;padding:5px 10px;border-radius:6px;border:1px solid var(--line);background:var(--green-bg);color:var(--green);cursor:pointer;">РОМ ету</button>
+        </div>
+      `).join('');
+      results.querySelectorAll('.mini-btn').forEach(btn=>{
+        btn.addEventListener('click', async (ev)=>{
+          ev.stopPropagation();
+          await setRole(btn.dataset.id, btn.dataset.role);
+          inp.value = '';
+          results.style.display='none'; results.innerHTML='';
+          renderRolesList();
+          renderRoleBanner();
+          renderManage();
+          renderDaily();
+        });
+      });
+    }
+
+    inp.addEventListener('focus', runSearch);
+    inp.addEventListener('input', ()=>{
+      clearTimeout(roleSearchTimer);
+      roleSearchTimer = setTimeout(runSearch, 220);
+    });
+    document.addEventListener('click', (ev)=>{
+      if (!results.contains(ev.target) && ev.target!==inp) { results.style.display='none'; }
+    });
+  }
+
+  // ---------- role banner ----------
+  function renderRoleBanner(){
+    const el = document.getElementById('roleBanner');
+    const manageTab = document.getElementById('manageTabBtn');
+    if (manageTab) manageTab.style.display = isAdmin ? '' : 'none'; // «Проекттер» тек РОМ-ға көрінеді
+    if (!el) return;
+    if (readOnly){
+      el.style.display = '';
+      el.className = 'role-banner readonly';
+      el.textContent = '👁 Тек оқу режимі — Сіз деректі көре аласыз, өзгерте алмайсыз.';
+    } else if (!isAdmin){
+      el.style.display = '';
+      el.className = 'role-banner interact';
+      el.textContent = '✏️ Күндік деректі толтыра аласыз.';
+    } else {
+      el.style.display = 'none';
+    }
+  }
+
+  // ---------- boot ----------
+  (async function boot(){
+    await initStorage();
+    await loadRoles();
+    renderAccessGate();
+    if (!allowed){
+      return; // locked — nothing else needs to load or render for this viewer
+    }
+    await loadAll();
+    if(isAdmin && state.projects.length===0 && Object.keys(state.entries).length===0){
+      // seed with example projects (first run convenience) — only an admin
+      // (РОМ / owner) can create projects, so only try when we know we can
+      await addProject('Түркістан тұғыры');
+      await addProject('Тамшы нұры');
+    }
+    renderRoleBanner();
+    renderDaily();
+    renderRolesPanel();
+    wireRoleSearch();
+  })();
+
+})();
+</script>
+</body>
+</html>
